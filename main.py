@@ -1,9 +1,11 @@
 from fastapi import FastAPI, UploadFile, File
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, FileResponse
+from fastapi.staticfiles import StaticFiles
 import fitz
 import os
 import uuid
 import zipfile
+import hashlib
 
 app = FastAPI()
 
@@ -13,17 +15,24 @@ OUTPUT_FOLDER = "outputs"
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 os.makedirs(OUTPUT_FOLDER, exist_ok=True)
 
+# 🔥 Static folder expose (IMPORTANT for preview)
+app.mount("/outputs", StaticFiles(directory=OUTPUT_FOLDER), name="outputs")
+
+
 @app.post("/extract-images/")
 async def extract_images(file: UploadFile = File(...)):
     try:
         pdf_id = str(uuid.uuid4())
         pdf_path = os.path.join(UPLOAD_FOLDER, f"{pdf_id}.pdf")
 
+        # Save PDF
         with open(pdf_path, "wb") as f:
             f.write(await file.read())
 
         doc = fitz.open(pdf_path)
+
         image_paths = []
+        seen_hashes = set()   # 🔥 duplicate remove
 
         for page_index in range(len(doc)):
             page = doc[page_index]
@@ -36,6 +45,12 @@ async def extract_images(file: UploadFile = File(...)):
                 image_bytes = base_image["image"]
                 image_ext = base_image["ext"]
 
+                # 🔥 hash check (duplicate filter)
+                img_hash = hashlib.md5(image_bytes).hexdigest()
+                if img_hash in seen_hashes:
+                    continue
+                seen_hashes.add(img_hash)
+
                 img_filename = f"{pdf_id}_page{page_index+1}_{img_index}.{image_ext}"
                 img_path = os.path.join(OUTPUT_FOLDER, img_filename)
 
@@ -44,6 +59,7 @@ async def extract_images(file: UploadFile = File(...)):
 
                 image_paths.append(img_filename)
 
+        # 🔥 ZIP create
         zip_filename = f"{pdf_id}.zip"
         zip_path = os.path.join(OUTPUT_FOLDER, zip_filename)
 
@@ -55,6 +71,7 @@ async def extract_images(file: UploadFile = File(...)):
             "status": "success",
             "total_images": len(image_paths),
             "images": image_paths,
+            "image_base_url": "/outputs/",   # 🔥 NEW
             "zip_download": f"/download/{zip_filename}"
         })
 
@@ -64,11 +81,17 @@ async def extract_images(file: UploadFile = File(...)):
             "message": str(e)
         })
 
+
+# 🔥 FIXED DOWNLOAD (real file download)
 @app.get("/download/{file_name}")
 def download_file(file_name: str):
     file_path = os.path.join(OUTPUT_FOLDER, file_name)
+
     if os.path.exists(file_path):
-        return JSONResponse({
-            "download_link": file_name
-        })
+        return FileResponse(
+            file_path,
+            media_type='application/octet-stream',
+            filename=file_name
+        )
+
     return {"error": "File not found"}
